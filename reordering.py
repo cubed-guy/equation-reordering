@@ -36,14 +36,19 @@ class Expression(ABC):
 	def __pow__(self, other):
 		return Exp(self, other)
 
+	def factor(self, fac_exp):
+		return self
+
+	def distribute(self):
+		return self
+
 class Sum(Expression):
 	def __init__(self, *exps):
 		super().__init__()
 		self.exps = exps
 
 	def __str__(self):
-		return ' + '.join(f'{exp}' for exp in self.exps)
-
+		return ' + '.join(f'({exp})' if isinstance(exp, Sum) else f'{exp}' for exp in self.exps)
 
 	@print_return
 	def extract(self, rhs, index):
@@ -63,6 +68,30 @@ class Sum(Expression):
 		if len(exps) == 1: return exps[0]
 
 		return Sum(*exps)
+
+	def factor(self, fac_exp):
+		fac_exps = []
+		for sum_exp in self.exps:
+			if isinstance(sum_exp, Neg):
+				sum_exp = sum_exp.exp
+				neg = True
+			else:
+				neg = False
+
+			if isinstance(sum_exp, Product):
+				i = sum_exp.exps.index(fac_exp)
+				_, exp = sum_exp.extract(Var('1'), i)
+				out_exp = Inv(exp)
+
+			elif fac_exp != sum_exp:
+				raise ValueError('Could not factorise')
+			else:
+				out_exp = Var('1')
+
+			if neg: fac_exps.append(Neg(out_exp))
+			else: fac_exps.append(out_exp)
+
+		return Sum(*fac_exps) * fac_exp
 
 class Neg(Expression):
 	def __init__(self, exp):
@@ -126,6 +155,20 @@ class Product(Expression):
 
 		if neg: return Neg(Product(*exps).simplify())
 		return Product(*exps)
+
+	def distribute(self):
+		for i, exp in enumerate(self.exps):
+			if isinstance(exp, Sum): break
+		else:
+			raise ValueError('A Sum type is required to be able to distribute')
+
+		# exp and i are not defined if self.exps is empty
+
+		sum_exp, rem = self.extract(Var('1'), i)
+		rem = Inv(rem)
+		exps = (Product(rem, term) for term in sum_exp.exps)
+
+		return Sum(*exps)
 
 class Inv(Expression):
 	def __init__(self, exp):
@@ -252,31 +295,49 @@ if __name__ == '__main__':
 		for i, exp in enumerate(stack):
 			print(f'[{len(stack) - i:3}]  ', exp)
 
-		command = input(': ').strip()
+		command = ''
+		while not command:
+			command = input(': ').strip()
 
-		if   command == '+': r = stack.pop(); stack.append(stack.pop() + r)
-		elif command == '-': r = stack.pop(); stack.append(stack.pop() - r)
-		elif command == '*': r = stack.pop(); stack.append(stack.pop() * r)
-		elif command == '/': r = stack.pop(); stack.append(stack.pop() / r)
-		elif command == '^': r = stack.pop(); stack.append(stack.pop() ** r)
+		try:
+			if   command == '+': r = stack.pop(); stack.append(stack.pop() + r)
+			elif command == '-': r = stack.pop(); stack.append(stack.pop() - r)
+			elif command == '*': r = stack.pop(); stack.append(stack.pop() * r)
+			elif command == '/': r = stack.pop(); stack.append(stack.pop() / r)
+			elif command == '^': r = stack.pop(); stack.append(stack.pop() ** r)
 
-		elif command == '.': stack.append(stack.pop().simplify())
-		elif command == '_': stack.append(Neg(stack.pop()))
+			elif command == '_': stack.append(Neg(stack.pop()))
+			elif command == '.': stack.append(stack.pop().simplify())
+			elif command == ',': stack.append(stack.pop().distribute().simplify())
+			elif command.startswith(','):
+				exp = stack.pop()
+				if not isinstance(exp, Sum): raise TypeError('Can only factorise Sum types')
+				sub_exp = exp.exps[0]
+				if isinstance(sub_exp, Product):
+					fac_exp = sub_exp.exps[int(command[1:])]
+					stack.append(exp.factor(fac_exp).simplify())
+				elif isinstance(sub_exp, Neg):
+					stack.append(exp.factor(sub_exp.exp).simplify())
+				else:
+					stack.append(exp.factor(sub_exp).simplify())
 
-		elif command == '$': stack.append(stack[-1])
-		elif command.startswith('$'): stack.append(stack[-int(command[1:])])
+			elif command == '$': stack.append(stack[-1])
+			elif command.startswith('$'): stack.append(stack[-int(command[1:])])
 
-		elif command.startswith('!'):
-			stack.append(Fn(*command[1:].split(), stack.pop()))
+			elif command.startswith('!'):
+				stack.append(Fn(*command[1:].split(), stack.pop()))
 
-		elif command == '/q':
-			break
-		elif command == '/d':
-			stack.pop()
-		elif command == '/s':
-			stack.extend((stack.pop(), stack.pop()))
+			elif command == '/q':
+				break
+			elif command == '/d':
+				stack.pop()
+			elif command == '/s':
+				stack.extend((stack.pop(), stack.pop()))
 
-		elif command.startswith('\\'):
-			stack.extend((stack.pop().extract(stack.pop(), int(command[1:])))[::-1])
-		else:
-			stack.append(Var(command))
+			elif command.startswith('\\'):
+				stack.extend((stack.pop().extract(stack.pop(), int(command[1:])))[::-1])
+			else:
+				stack.append(Var(command))
+		except Exception as e:
+			print(f'Could not execute ({e.__class__.__name__})')
+			print(e)
