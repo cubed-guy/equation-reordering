@@ -52,7 +52,21 @@ class Sum(Expression):
 
 	@print_return
 	def extract(self, rhs, index):
-		return self.exps[index], Sum(rhs, Neg(Sum(*self.exps[:index], *self.exps[index+1:])))
+		if isinstance(index, slice):
+			return Sum(*self.exps[index]), Sum(rhs, Neg(Sum(*self.exps[:index.start or 0], *self.exps[index.stop:])))
+		if isinstance(index, int):
+			return self.exps[index], Sum(rhs, Neg(Sum(*self.exps[:index], *self.exps[index+1:])))
+		print(index, 'is not an int or a slice')
+		raise TypeError(f'{index!r} is not an int or a slice')
+
+	@print_return
+	def select(self, name, index):
+		if isinstance(index, slice):
+			return Sum(*self.exps[index]), Sum(*self.exps[:index.start or 0], Var(name), *self.exps[index.stop:])
+		if isinstance(index, int):
+			return self.exps[index], Sum(*self.exps[:index], Var(name), *self.exps[index+1:])
+		print(index, 'is not an int or a slice')
+		raise TypeError(f'{index!r} is not an int or a slice')
 
 	@print_return
 	def simplify(self):
@@ -79,6 +93,7 @@ class Sum(Expression):
 				neg = False
 
 			if isinstance(sum_exp, Product):
+				print('finding', fac_exp, 'in', sum_exp)
 				i = sum_exp.exps.index(fac_exp)
 				_, exp = sum_exp.extract(Var('1'), i)
 				out_exp = Inv(exp)
@@ -92,6 +107,10 @@ class Sum(Expression):
 			else: fac_exps.append(out_exp)
 
 		return Sum(*fac_exps) * fac_exp
+
+	@print_return
+	def substitute(self, find_exp, sub_exp):
+		return Sum(*(sub_exp if exp == find_exp else exp.substitute(find_exp, sub_exp) for exp in self.exps))
 
 class Neg(Expression):
 	def __init__(self, exp):
@@ -109,6 +128,11 @@ class Neg(Expression):
 		return self.exp, Neg(rhs)
 
 	@print_return
+	def select(self, name, index = 0):
+		if index != 0: raise IndexError('Neg only takes index 0')
+		return self.exp, Neg(Var(name))
+
+	@print_return
 	def simplify(self):
 
 		exp = self.exp.simplify()
@@ -118,18 +142,34 @@ class Neg(Expression):
 
 		return Neg(exp)
 
+	def distribute(self):
+		return Neg(self.exp.distribute())
+
+	@print_return
+	def substitute(self, find_exp, sub_exp):
+		if self.exp == find_exp: return Neg(sub_exp)
+		return Neg(self.exp.substitute(find_exp, sub_exp))
+
 class Product(Expression):
 	def __init__(self, *exps):
 		super().__init__()
 		self.exps = exps
 	
 	def __str__(self):
-		return ' '.join(f'({exp})' if isinstance(exp, (Sum, Neg)) else f'{exp}' for exp in self.exps)
+		return ' '.join(f'({exp})' if isinstance(exp, (Product, Sum, Neg)) else f'{exp}' for exp in self.exps)
 
 	@print_return
 	def extract(self, rhs, index):
-		return self.exps[index], Product(rhs, Inv(self.__class__(*self.exps[:index], *self.exps[index+1:])))
+		return self.exps[index], Product(rhs, Inv(Product(*self.exps[:index], *self.exps[index+1:])))
 
+	@print_return
+	def select(self, name, index):
+		if isinstance(index, slice):
+			return Product(*self.exps[index]), Product(*self.exps[:index.start or 0], Var(name), *self.exps[index.stop:])
+		if isinstance(index, int):
+			return self.exps[index], Product(*self.exps[:index], Var(name), *self.exps[index+1:])
+		print(index, 'is not an int or a slice')
+		raise TypeError(f'{index!r} is not an int or a slice')
 
 	@print_return
 	def simplify(self):
@@ -170,6 +210,10 @@ class Product(Expression):
 
 		return Sum(*exps)
 
+	@print_return
+	def substitute(self, find_exp, sub_exp):
+		return Product(*(sub_exp if exp == find_exp else exp.substitute(find_exp, sub_exp) for exp in self.exps))
+
 class Inv(Expression):
 	def __init__(self, exp):
 		super().__init__()
@@ -181,13 +225,26 @@ class Inv(Expression):
 		return self.exp, Inv(rhs)
 
 	@print_return
+	def select(self, name, index = 0):
+		if index != 0: raise IndexError('Inv only takes index 0')
+		return self.exp, Inv(Var(name))
+
+	@print_return
 	def simplify(self):
 		exp = self.exp.simplify()
 		if isinstance(exp, Inv): return exp.exp
+		if isinstance(exp, Neg): return Neg(Inv(exp.exp).simplify())
 		if isinstance(exp, Product):
 			return Product(*(Inv(exp) for exp in exp.exps)).simplify()
 
 		return Inv(exp)
+
+
+	@print_return
+	def substitute(self, find_exp, sub_exp):
+		if self.exp == find_exp: return Inv(sub_exp)
+		return Inv(self.exp.substitute(find_exp, sub_exp))
+
 
 class Exp(Expression):
 	def __init__(self, base, exp):
@@ -213,6 +270,14 @@ class Exp(Expression):
 		if index == 1:
 			return self.exp, Log(self.base, rhs)
 		raise IndexError('Exp has only two valid indices: 0 and 1')
+	
+	@print_return
+	def extract(self, rhs, index = 1):
+		if index == 0:
+			return self.base, Exp(Var(name), self.exp)
+		if index == 1:
+			return self.exp, Exp(self.base, Var(name))
+		raise IndexError('Exp has only two valid indices: 0 and 1')
 
 	@print_return
 	def simplify(self):
@@ -221,6 +286,16 @@ class Exp(Expression):
 
 		if isinstance(base, Exp):
 			return Exp(base.base, Product((base.exp, exp)))
+
+		return Exp(base, exp)
+
+	@print_return
+	def substitute(self, find_exp, sub_exp):
+		if self.base == find_exp: base = sub_exp
+		else: base = self.base.substitute(find_exp, sub_exp)
+
+		if self.exp == find_exp: exp = sub_exp
+		else: exp = self.exp.substitute(find_exp, sub_exp)
 
 		return Exp(base, exp)
 
@@ -239,6 +314,15 @@ class Log(Expression):
 		raise IndexError('Log has only two valid indices: 0 and 1')
 
 	@print_return
+	def select(self, name, index = 1):
+		if index == 0:
+			return self.base, Log(Var(name), self.arg)
+		if index == 1:
+			return self.arg, Log(self.base, Var(name))
+		raise IndexError('Log has only two valid indices: 0 and 1')
+
+
+	@print_return
 	def simplify(self):
 
 		base = self.base.simplify()
@@ -251,6 +335,17 @@ class Log(Expression):
 			return Product(Log(base.base, arg), Inv(base.exp))
 
 		return Log(base, arg)
+
+	@print_return
+	def substitute(self, find_exp, sub_exp):
+		if self.arg == find_exp: arg = sub_exp
+		else: arg = self.arg.substitute(find_exp, sub_exp)
+
+		if self.base == find_exp: base = sub_exp
+		else: base = self.base.substitute(find_exp, sub_exp)
+
+		return Log(arg, base)
+
 
 class Var(Expression):
 	def __init__(self, name):
@@ -265,7 +360,16 @@ class Var(Expression):
 		return self, rhs
 
 	@print_return
+	def select(self, name, index = 0):
+		if index != 0: raise IndexError('Variables only take index 0')
+		return self, Var(name)
+
+	@print_return
 	def simplify(self):
+		return self
+
+	@print_return
+	def substitute(self, find_exp, sub_exp):
 		return self
 
 class Fn(Expression):
@@ -287,12 +391,20 @@ class Fn(Expression):
 
 		return self
 
+
+	@print_return
+	def substitute(self, find_exp, sub_exp):
+		if self.arg == find_exp: arg = sub_exp
+		else: arg = self.arg.substitute(find_exp, sub_exp)
+
+		return Fn(self.name, self.inv_name, arg)
+
 if __name__ == '__main__':
-	stack = []
+	stack = [Var('0')]
 	while 1:
 		print()
 
-		for i, exp in enumerate(stack):
+		for i, exp in enumerate(stack[1:], 1):
 			print(f'[{len(stack) - i:3}]  ', exp)
 
 		command = ''
@@ -312,14 +424,19 @@ if __name__ == '__main__':
 			elif command.startswith(','):
 				exp = stack.pop()
 				if not isinstance(exp, Sum): raise TypeError('Can only factorise Sum types')
-				sub_exp = exp.exps[0]
-				if isinstance(sub_exp, Product):
-					fac_exp = sub_exp.exps[int(command[1:])]
-					stack.append(exp.factor(fac_exp).simplify())
-				elif isinstance(sub_exp, Neg):
-					stack.append(exp.factor(sub_exp.exp).simplify())
+				term = exp.exps[0]
+
+				if isinstance(term, Neg): term = term.exp
+
+				index = int(command[1:])
+
+				if isinstance(term, Product):
+					fac_exp = term.exps[index]
+				elif index != 0:
+					raise IndexError('Prime term can only be indexed with 0')
 				else:
-					stack.append(exp.factor(sub_exp).simplify())
+					fac_exp = term
+				stack.append(exp.factor(fac_exp).simplify())
 
 			elif command == '$': stack.append(stack[-1])
 			elif command.startswith('$'): stack.append(stack[-int(command[1:])])
@@ -331,13 +448,51 @@ if __name__ == '__main__':
 				break
 			elif command == '/d':
 				stack.pop()
-			elif command == '/s':
-				stack.extend((stack.pop(), stack.pop()))
+			elif command == '\\':
+				index = -int(command[2:].strip() or 2)
+				stack.append(stack.pop(index))
+			elif command == '/r':
+				print(repr(stack[-1]))
+			elif command.startswith('/s'):
+				split = command[2:].split()
+				if len(split) == 0:  # swap
+					print('swap')
+					stack.append(stack.pop(-2))
+				elif len(split) == 1:  # substitute
+					print('sub')
+					name = split[0]
+					sub_exp = stack.pop()
+					exp = stack.pop()
+					stack.append(exp.substitute(Var(name), sub_exp))
+				elif len(split) == 2:  # select index
+					print('select')
+					index, name = split
+					index = int(index)
+					stack.extend(stack.pop().select(name, index)[::-1])
+				else:  # select slice
+					print('select slice')
+					start, stop, name = split
+					start = int(start)
+					stop = int(stop)
+					stack.extend(stack.pop().select(name, slice(start, stop))[::-1])
 
 			elif command.startswith('\\'):
-				stack.extend((stack.pop().extract(stack.pop(), int(command[1:])))[::-1])
+				index = command[1:]
+				if ' ' not in index: index = int(index)
+				else:
+					start, stop = index.split()
+					# print(start, stop)
+					index = slice(int(start), int(stop))
+
+				print(index)
+
+				stack.extend((stack.pop().extract(stack.pop(), index))[::-1])
+
 			else:
 				stack.append(Var(command))
 		except Exception as e:
 			print(f'Could not execute ({e.__class__.__name__})')
 			print(e)
+
+		if not stack or stack[0] != Var('0'):
+			stack.insert(0, Var('0'))
