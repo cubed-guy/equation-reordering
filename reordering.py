@@ -42,6 +42,9 @@ class Expression(ABC):
 	def distribute(self):
 		return self
 
+	def eval_consts(self):
+		return self
+
 class Sum(Expression):
 	def __init__(self, *exps):
 		super().__init__()
@@ -93,7 +96,7 @@ class Sum(Expression):
 				neg = False
 
 			if isinstance(sum_exp, Product):
-				print('finding', fac_exp, 'in', sum_exp)
+				# print('finding', fac_exp, 'in', sum_exp)
 				i = sum_exp.exps.index(fac_exp)
 				_, exp = sum_exp.extract(Var('1'), i)
 				out_exp = Inv(exp)
@@ -111,6 +114,21 @@ class Sum(Expression):
 	@print_return
 	def substitute(self, find_exp, sub_exp):
 		return Sum(*(sub_exp if exp == find_exp else exp.substitute(find_exp, sub_exp) for exp in self.exps))
+
+	@print_return
+	def eval_consts(self):
+		exps = [exp.eval_consts() for exp in self.exps]
+		const = 0
+		out_exps = []
+		for exp in exps:
+			if isinstance(exp, Var) and exp.is_const():
+				const += float(exp.name)
+			else:
+				out_exps.append(exp)
+
+		if not out_exps:
+			return Var(str(const))
+		return Sum(Var(str(const)), *out_exps)
 
 class Neg(Expression):
 	def __init__(self, exp):
@@ -149,6 +167,15 @@ class Neg(Expression):
 	def substitute(self, find_exp, sub_exp):
 		if self.exp == find_exp: return Neg(sub_exp)
 		return Neg(self.exp.substitute(find_exp, sub_exp))
+
+	@print_return
+	def eval_consts(self):
+		post_const = self.exp.eval_consts()
+		if isinstance(post_const, Var) and post_const.is_const():
+			return Var(str(-float(post_const.name)))
+
+		return post_const
+
 
 class Product(Expression):
 	def __init__(self, *exps):
@@ -214,7 +241,22 @@ class Product(Expression):
 	def substitute(self, find_exp, sub_exp):
 		return Product(*(sub_exp if exp == find_exp else exp.substitute(find_exp, sub_exp) for exp in self.exps))
 
-class Inv(Expression):
+	def eval_consts(self):
+		exps = [exp.eval_consts() for exp in self.exps]
+		const = 1
+		out_exps = []
+		for exp in exps:
+			if isinstance(exp, Var) and exp.name.replace('.', '', 1).isdigit():
+				const *= float(exp.name)
+			else:
+				out_exps.append(exp)
+
+		if not out_exps:
+			return Var(str(const))
+		return Product(Var(str(const)), *out_exps)
+
+
+class Inv(Expression):  # Inverse
 	def __init__(self, exp):
 		super().__init__()
 		self.exp = exp
@@ -245,8 +287,15 @@ class Inv(Expression):
 		if self.exp == find_exp: return Inv(sub_exp)
 		return Inv(self.exp.substitute(find_exp, sub_exp))
 
+	@print_return
+	def eval_consts(self):
+		post_const = self.exp.eval_consts()
+		if isinstance(post_const, Var) and post_const.is_const():
+			return Var(str(1/float(post_const.name)))
 
-class Exp(Expression):
+		return post_const
+
+class Exp(Expression):  # Exponent
 	def __init__(self, base, exp):
 		super().__init__()
 		self.base = base
@@ -354,6 +403,13 @@ class Var(Expression):
 	def __str__(self):
 		return self.name
 
+	def is_const(self):
+		if self.name.startswith('-'):
+			name = self.name[1:]
+		else:
+			name = self.name
+		return name.replace('.', '', 1).isdigit()
+
 	@print_return
 	def extract(self, rhs, index = 0):
 		if index != 0: raise IndexError('Variables only take index 0')
@@ -380,7 +436,7 @@ class Fn(Expression):
 
 	def __str__(self):
 		return f'{self.name}({self.arg})'
-		
+
 	def extract(self, rhs, index = 0):
 		if index != 0: raise IndexError(f'{name!r} only takes index 0')
 		return self.arg, Fn(self.inv_name, self.name, rhs)
@@ -420,9 +476,32 @@ if __name__ == '__main__':
 
 			elif command == '_': stack.append(Neg(stack.pop()))
 			elif command == '.': stack.append(stack.pop().simplify())
+			elif command.startswith('.'):
+				split = command[1:].split()
+
+				if len(split) == 2:  # select index
+					print('select')
+					index, name = split
+					index = int(index)
+					stack.extend(stack.pop().select(name, index)[::-1])
+				elif len(split) == 3:  # select slice
+					print('select slice')
+					start, stop, name = split
+					start = int(start)
+					stop = int(stop)
+					stack.extend(stack.pop().select(name, slice(start, stop))[::-1])
+				else:
+					raise ValueError('Invalid Command Format. Expected exactly 2 or 3 arguments')
+
 			elif command == ',': stack.append(stack.pop().distribute().simplify())
 			elif command.startswith(','):
 				exp = stack.pop()
+				if isinstance(exp, Neg):
+					neg = True
+					exp = exp.exp
+				else:
+					neg = False
+
 				if not isinstance(exp, Sum): raise TypeError('Can only factorise Sum types')
 				term = exp.exps[0]
 
@@ -436,7 +515,11 @@ if __name__ == '__main__':
 					raise IndexError('Prime term can only be indexed with 0')
 				else:
 					fac_exp = term
-				stack.append(exp.factor(fac_exp).simplify())
+
+				if neg:
+					stack.append(Neg(exp.factor(fac_exp)).simplify())
+				else:
+					stack.append(exp.factor(fac_exp).simplify())
 
 			elif command == '$': stack.append(stack[-1])
 			elif command.startswith('$'): stack.append(stack[-int(command[1:])])
@@ -446,13 +529,40 @@ if __name__ == '__main__':
 
 			elif command == '/q':
 				break
-			elif command == '/d':
-				stack.pop()
+
 			elif command == '\\':
-				index = -int(command[2:].strip() or 2)
-				stack.append(stack.pop(index))
+				stack.pop()
+
 			elif command == '/r':
 				print(repr(stack[-1]))
+			elif command == '/l':
+				print()
+				exp = stack[-1]
+				if isinstance(exp, (Neg, Inv)):
+					print(exp.__class__.__name__, end = ' ')
+					exp = exp.exp
+
+				print(exp.__class__.__name__)
+				for i, term in enumerate(exp.exps):
+					print(f'({i:2}) ', term)
+
+			elif command == '/ll':
+				exp = stack[-1]
+				if isinstance(exp, (Neg, Inv)):
+					print(exp.__class__.__name__, end = ' ')
+					exp = exp.exp
+
+				print(exp.__class__.__name__)
+				exp = exp.exps[0]
+
+				if isinstance(exp, (Neg, Inv)):
+					print(exp.__class__.__name__, end = ' ')
+					exp = exp.exp
+
+				print(exp.__class__.__name__)
+				for i, term in enumerate(exp.exps):
+					print(f'({i:2}) ', term)
+
 			elif command.startswith('/s'):
 				split = command[2:].split()
 				if len(split) == 0:  # swap
@@ -463,20 +573,14 @@ if __name__ == '__main__':
 					name = split[0]
 					sub_exp = stack.pop()
 					exp = stack.pop()
-					stack.append(exp.substitute(Var(name), sub_exp))
-				elif len(split) == 2:  # select index
-					print('select')
-					index, name = split
-					index = int(index)
-					stack.extend(stack.pop().select(name, index)[::-1])
-				else:  # select slice
-					print('select slice')
-					start, stop, name = split
-					start = int(start)
-					stop = int(stop)
-					stack.extend(stack.pop().select(name, slice(start, stop))[::-1])
+					stack.extend([exp.substitute(Var(name), sub_exp), sub_exp])
+				else:
+					raise ValueError('Invalid Command Format. Expected at most 1 argument')
 
-			elif command.startswith('\\'):
+			elif command == '=':
+				stack.append(stack.pop().eval_consts())
+
+			elif command.startswith('='):
 				index = command[1:]
 				if ' ' not in index: index = int(index)
 				else:
