@@ -1,16 +1,23 @@
-from abc import ABC
+from abc import ABC, abstractmethod
 
 def print_return(f):
 	def inner(*args, **kwargs):
-		# print('running', f.__qualname__, 'on', *args)
+		# print('>>> running', f.__qualname__, 'on', *args)
 		r = f(*args, **kwargs)
-		# print(f.__qualname__, 'returned', r)
+		# print('<<< returned', f.__qualname__, 'with', r)
 		return r
 	return inner
 
 class Expression(ABC):
+	def __init__(self, exp = None):
+		super().__init__()
+		self.exp = exp
+	
+	def __contains__(self, exp):
+		return exp == self.exp or exp in self.exp
+
 	def __repr__(self):
-		return f'{self.__class__.__name__}({", ".join(map(repr, self.__dict__.values()))})'
+		return f'{self.__class__.__name__}({", ".join(f"{v!r}" for k, v in self.__dict__.items())})'
 
 	def __str__(self):
 		return f'{self.__class__.__name__}({", ".join(map(str, self.__dict__.values()))})'
@@ -42,16 +49,28 @@ class Expression(ABC):
 	def distribute(self):
 		return self
 
+	@print_return
 	def eval_consts(self):
 		return self
+
+	# @abstractmethod
+	# def solve_for(self, var, *, rhs):
+	# 	...
 
 class Sum(Expression):
 	def __init__(self, *exps):
 		super().__init__()
 		self.exps = exps
 
+	def __contains__(self, exp):
+		return exp in self.exps or any(exp in sub_exp for sub_exp in self.exps)
+
 	def __str__(self):
-		return ' + '.join(f'({exp})' if isinstance(exp, Sum) else f'{exp}' for exp in self.exps)
+		out = ' '.join(
+			f'- {exp[1:]}' if exp.startswith('-') else f'+ {exp}'
+			for exp in (f'({exp})' if isinstance(exp, Sum) else f'{exp}' for exp in self.exps)
+		)
+		return out.removeprefix('+ ')
 
 	@print_return
 	def extract(self, rhs, index):
@@ -73,14 +92,16 @@ class Sum(Expression):
 
 	@print_return
 	def simplify(self):
-		exps = [exp.simplify() for exp in self.exps if exp != Var('0')]
+		exps = [exp.simplify() for exp in self.exps if exp not in (Const(0), Var('0'), Var('0.0'))]
+		# print('Simplified sum', self)
+		# print('to            ', Sum(*exps))
 
 		sums = (sub_exp for exp in exps if isinstance(exp, Sum) for sub_exp in exp.exps)
 		not_sums = (exp for exp in exps if not isinstance(exp, Sum))
 
 		exps = (*sums, *not_sums)
 
-		if not exps: return Var('0')
+		if not exps: return Const(0)
 
 		if len(exps) == 1: return exps[0]
 
@@ -98,13 +119,14 @@ class Sum(Expression):
 			if isinstance(sum_exp, Product):
 				# print('finding', fac_exp, 'in', sum_exp)
 				i = sum_exp.exps.index(fac_exp)
-				_, exp = sum_exp.extract(Var('1'), i)
+				# TODO: rewrite using .select()
+				_, exp = sum_exp.extract(Const(1), i)
 				out_exp = Inv(exp)
 
 			elif fac_exp != sum_exp:
 				raise ValueError('Could not factorise')
 			else:
-				out_exp = Var('1')
+				out_exp = Const(1)
 
 			if neg: fac_exps.append(Neg(out_exp))
 			else: fac_exps.append(out_exp)
@@ -123,18 +145,17 @@ class Sum(Expression):
 		for exp in exps:
 			if isinstance(exp, Var) and exp.is_const():
 				const += float(exp.name)
+			elif isinstance(exp, Const):
+				const += exp.value
 			else:
 				out_exps.append(exp)
 
 		if not out_exps:
-			return Var(str(const))
-		return Sum(Var(str(const)), *out_exps)
+			return Const(const)
+		print('Evaluating constants for', self, '->', const, *out_exps)
+		return Sum(Const(const), *out_exps)
 
 class Neg(Expression):
-	def __init__(self, exp):
-		super().__init__()
-		self.exp = exp
-
 	def __str__(self):
 		if isinstance(self.exp, Sum):
 			return f'-({self.exp!s})'
@@ -172,16 +193,21 @@ class Neg(Expression):
 	def eval_consts(self):
 		post_const = self.exp.eval_consts()
 		if isinstance(post_const, Var) and post_const.is_const():
-			return Var(str(-float(post_const.name)))
+			return Const(-float(post_const.name))
+		if isinstance(post_const, Const):
+			return Const(-post_const.value)
 
-		return post_const
+		return Neg(post_const)
 
 
 class Product(Expression):
 	def __init__(self, *exps):
 		super().__init__()
 		self.exps = exps
-	
+
+	def __contains__(self, exp):
+		return exp in self.exps or any(exp in sub_exp for sub_exp in self.exps)
+
 	def __str__(self):
 		return ' '.join(f'({exp})' if isinstance(exp, (Product, Sum, Neg)) else f'{exp}' for exp in self.exps)
 
@@ -200,7 +226,7 @@ class Product(Expression):
 
 	@print_return
 	def simplify(self):
-		exps = [exp.simplify() for exp in self.exps if exp != Var('1')]
+		exps = [exp.simplify() for exp in self.exps if exp not in (Const(1), Var('1'), Var('1.0'))]
 
 		products = (sub_exp for exp in exps if isinstance(exp, Product) for sub_exp in exp.exps)
 		not_products = (exp for exp in exps if not isinstance(exp, Product))
@@ -231,7 +257,7 @@ class Product(Expression):
 
 		# exp and i are not defined if self.exps is empty
 
-		sum_exp, rem = self.extract(Var('1'), i)
+		sum_exp, rem = self.extract(Const(1), i)
 		rem = Inv(rem)
 		exps = (Product(rem, term) for term in sum_exp.exps)
 
@@ -241,26 +267,25 @@ class Product(Expression):
 	def substitute(self, find_exp, sub_exp):
 		return Product(*(sub_exp if exp == find_exp else exp.substitute(find_exp, sub_exp) for exp in self.exps))
 
+	@print_return
 	def eval_consts(self):
 		exps = [exp.eval_consts() for exp in self.exps]
 		const = 1
 		out_exps = []
 		for exp in exps:
-			if isinstance(exp, Var) and exp.name.replace('.', '', 1).isdigit():
+			if isinstance(exp, Var) and exp.is_const():
 				const *= float(exp.name)
+			elif isinstance(exp, Const):
+				const *= exp.value
 			else:
 				out_exps.append(exp)
 
 		if not out_exps:
-			return Var(str(const))
-		return Product(Var(str(const)), *out_exps)
+			return Const(const)
+		return Product(Const(const), *out_exps)
 
 
 class Inv(Expression):  # Inverse
-	def __init__(self, exp):
-		super().__init__()
-		self.exp = exp
-
 	@print_return
 	def extract(self, rhs, index = 0):
 		if index != 0: raise IndexError('Inv only takes index 0')
@@ -281,7 +306,6 @@ class Inv(Expression):  # Inverse
 
 		return Inv(exp)
 
-
 	@print_return
 	def substitute(self, find_exp, sub_exp):
 		if self.exp == find_exp: return Inv(sub_exp)
@@ -290,16 +314,24 @@ class Inv(Expression):  # Inverse
 	@print_return
 	def eval_consts(self):
 		post_const = self.exp.eval_consts()
-		if isinstance(post_const, Var) and post_const.is_const():
-			return Var(str(1/float(post_const.name)))
 
-		return post_const
+		if isinstance(post_const, Var) and post_const.is_const():
+			val = float(post_const.name)
+			if val == 0: return Inv(Const(0))
+			return Const(1/val)
+		if isinstance(post_const, Const):
+			if posr_const.val == 0: return Inv(Const(0))
+			return Const(1/post_const.value)
+
+		return Inv(post_const)
 
 class Exp(Expression):  # Exponent
 	def __init__(self, base, exp):
-		super().__init__()
+		super().__init__(exp)  # assigns self.exp = exp anyways. Teeny bit faster compared to assigning it outside again
 		self.base = base
-		self.exp = exp
+
+	def __contains__(self, exp):
+		return exp in (self.base, self.exp) or exp in self.base or exp in self.exp
 
 	def __str__(self):
 		if isinstance(self.base, (Sum, Neg, Product)):
@@ -321,7 +353,7 @@ class Exp(Expression):  # Exponent
 		raise IndexError('Exp has only two valid indices: 0 and 1')
 	
 	@print_return
-	def extract(self, rhs, index = 1):
+	def select(self, rhs, index = 1):
 		if index == 0:
 			return self.base, Exp(Var(name), self.exp)
 		if index == 1:
@@ -348,12 +380,37 @@ class Exp(Expression):  # Exponent
 
 		return Exp(base, exp)
 
+	@print_return
+	def eval_consts(self):
+		base = self.base.eval_consts()
+		exp = self.exp.eval_consts()
+
+		if isinstance(base, Var) and base.is_const():
+			base = float(base.name)
+		elif isinstance(base, Const):
+			base = base.value
+		else:
+			return Exp(base, exp)
+
+		if isinstance(exp, Var) and exp.is_const():
+			exp = float(exp.name)
+		elif isinstance(exp, Const):
+			exp = exp.value
+		else:
+			return Exp(base, exp)
+
+		return Const(base**exp)
+
+
 class Log(Expression):
 	def __init__(self, base, arg):
 		super().__init__()
 		self.base = base
 		self.arg = arg
-	
+
+	def __contains__(self, exp):
+		return exp in (self.base, self.arg) or exp in self.base or exp in self.arg
+
 	@print_return
 	def extract(self, rhs, index = 1):
 		if index == 0:
@@ -373,7 +430,6 @@ class Log(Expression):
 
 	@print_return
 	def simplify(self):
-
 		base = self.base.simplify()
 		arg = self.arg.simplify()
 
@@ -399,6 +455,9 @@ class Log(Expression):
 class Var(Expression):
 	def __init__(self, name):
 		self.name = name
+
+	def __contains__(self, exp):
+		return exp == self
 	
 	def __str__(self):
 		return self.name
@@ -428,11 +487,49 @@ class Var(Expression):
 	def substitute(self, find_exp, sub_exp):
 		return self
 
+	@print_return
+	def eval_consts(self):
+		if self.is_const():
+			return Const(float(self.name))
+		else:
+			return self
+
+class Const(Expression):
+	def __init__(self, value):
+		self.value = value
+
+	def __contains__(self, exp):
+		return exp == self
+
+	def __str__(self):
+		return f'{self.value}'
+
+	@print_return
+	def extract(self, rhs, index = 0):
+		if index != 0: raise IndexError('Constants only take index 0')
+		return self, rhs
+
+	@print_return
+	def select(self, name, index = 0):
+		if index != 0: raise IndexError('Constants only take index 0')
+		return self, Var(name)
+
+	@print_return
+	def simplify(self):
+		return self
+
+	@print_return
+	def substitute(self, find_exp, sub_exp):
+		return self
+
 class Fn(Expression):
 	def __init__(self, name, inv_name, arg):
 		self.name = name
 		self.inv_name = inv_name
 		self.arg = arg
+
+	def __contains__(self, exp):
+		return exp == self.arg or exp in self.arg
 
 	def __str__(self):
 		return f'{self.name}({self.arg})'
@@ -455,47 +552,56 @@ class Fn(Expression):
 
 		return Fn(self.name, self.inv_name, arg)
 
-if __name__ == '__main__':
-	stack = [Var('0')]
-	while 1:
-		print()
 
-		for i, exp in enumerate(stack[1:], 1):
-			print(f'[{len(stack) - i:3}]  ', exp)
-
-		command = ''
-		while not command:
-			command = input(': ').strip()
+class Command_processor:
+	def __init__(self):
+		self.stack = [Const(0)]
+	
+	def submit_command(self, command):
+		out = StringIO()
 
 		try:
-			if   command == '+': r = stack.pop(); stack.append(stack.pop() + r)
-			elif command == '-': r = stack.pop(); stack.append(stack.pop() - r)
-			elif command == '*': r = stack.pop(); stack.append(stack.pop() * r)
-			elif command == '/': r = stack.pop(); stack.append(stack.pop() / r)
-			elif command == '^': r = stack.pop(); stack.append(stack.pop() ** r)
+			if   command == '+':
+				r = self.stack.pop()
+				self.stack.append(self.stack.pop() + r)
+			elif command == '-':
+				r = self.stack.pop()
+				self.stack.append(self.stack.pop() - r)
+			elif command == '*':
+				r = self.stack.pop()
+				self.stack.append(self.stack.pop() * r)
+			elif command == '/':
+				r = self.stack.pop()
+				self.stack.append(self.stack.pop() / r)
+			elif command == '^':
+				r = self.stack.pop()
+				self.stack.append(self.stack.pop() ** r)
 
-			elif command == '_': stack.append(Neg(stack.pop()))
-			elif command == '.': stack.append(stack.pop().simplify())
+			elif command == '_': self.stack.append(Neg(self.stack.pop()))
+			elif command == '.': self.stack.append(self.stack.pop().simplify())
 			elif command.startswith('.'):
 				split = command[1:].split()
 
 				if len(split) == 2:  # select index
-					print('select')
+					print('select', file=out)
 					index, name = split
 					index = int(index)
-					stack.extend(stack.pop().select(name, index)[::-1])
+					self.stack.extend(
+						self.stack.pop().select(name, index)[::-1]
+					)
+
 				elif len(split) == 3:  # select slice
-					print('select slice')
+					print('select slice', file=out)
 					start, stop, name = split
 					start = int(start)
 					stop = int(stop)
-					stack.extend(stack.pop().select(name, slice(start, stop))[::-1])
+					self.stack.extend(self.stack.pop().select(name, slice(start, stop))[::-1])
 				else:
 					raise ValueError('Invalid Command Format. Expected exactly 2 or 3 arguments')
 
-			elif command == ',': stack.append(stack.pop().distribute().simplify())
+			elif command == ',': self.stack.append(self.stack.pop().distribute().simplify())
 			elif command.startswith(','):
-				exp = stack.pop()
+				exp = self.stack.pop()
 				if isinstance(exp, Neg):
 					neg = True
 					exp = exp.exp
@@ -517,86 +623,106 @@ if __name__ == '__main__':
 					fac_exp = term
 
 				if neg:
-					stack.append(Neg(exp.factor(fac_exp)).simplify())
+					self.stack.append(Neg(exp.factor(fac_exp)).simplify())
 				else:
-					stack.append(exp.factor(fac_exp).simplify())
+					self.stack.append(exp.factor(fac_exp).simplify())
 
-			elif command == '$': stack.append(stack[-1])
-			elif command.startswith('$'): stack.append(stack[-int(command[1:])])
+			elif command == '$': self.stack.append(self.stack[-1])
+			elif command.startswith('$'): self.stack.append(self.stack[-int(command[1:])])
 
 			elif command.startswith('!'):
-				stack.append(Fn(*command[1:].split(), stack.pop()))
-
-			elif command == '/q':
-				break
+				self.stack.append(Fn(*command[1:].split(), self.stack.pop()))
 
 			elif command == '\\':
-				stack.pop()
+				self.stack.pop()
 
 			elif command == '/r':
-				print(repr(stack[-1]))
+				print(repr(self.stack[-1]), file=out)
 			elif command == '/l':
-				print()
-				exp = stack[-1]
+				print(file=out)
+				exp = self.stack[-1]
 				if isinstance(exp, (Neg, Inv)):
-					print(exp.__class__.__name__, end = ' ')
+					print(exp.__class__.__name__, end = ' ', file=out)
 					exp = exp.exp
 
-				print(exp.__class__.__name__)
+				print(exp.__class__.__name__, file=out)
 				for i, term in enumerate(exp.exps):
-					print(f'({i:2}) ', term)
+					print(f'({i:2}) ', term, file=out)
 
 			elif command == '/ll':
-				exp = stack[-1]
+				exp = self.stack[-1]
 				if isinstance(exp, (Neg, Inv)):
-					print(exp.__class__.__name__, end = ' ')
+					print(exp.__class__.__name__, end = ' ', file=out)
 					exp = exp.exp
 
-				print(exp.__class__.__name__)
+				print(exp.__class__.__name__, file=out)
 				exp = exp.exps[0]
 
 				if isinstance(exp, (Neg, Inv)):
-					print(exp.__class__.__name__, end = ' ')
+					print(exp.__class__.__name__, end = ' ', file=out)
 					exp = exp.exp
 
-				print(exp.__class__.__name__)
+				print(exp.__class__.__name__, file=out)
 				for i, term in enumerate(exp.exps):
-					print(f'({i:2}) ', term)
+					print(f'({i:2}) ', term, file=out)
 
 			elif command.startswith('/s'):
 				split = command[2:].split()
 				if len(split) == 0:  # swap
-					print('swap')
-					stack.append(stack.pop(-2))
+					print('swap', file=out)
+					self.stack.append(self.stack.pop(-2))
 				elif len(split) == 1:  # substitute
-					print('sub')
+					print('sub', file=out)
 					name = split[0]
-					sub_exp = stack.pop()
-					exp = stack.pop()
-					stack.extend([exp.substitute(Var(name), sub_exp), sub_exp])
+					sub_exp = self.stack.pop()
+					exp = self.stack.pop()
+					self.stack.extend([exp.substitute(Var(name), sub_exp), sub_exp])
 				else:
 					raise ValueError('Invalid Command Format. Expected at most 1 argument')
 
 			elif command == '=':
-				stack.append(stack.pop().eval_consts())
+				self.stack.append(self.stack.pop().eval_consts())
+
+			elif command.startswith('=='):
+				name = command[2:]
+				self.stack.append(self.stack.pop().solve_for(Var(name), rhs=self.stack.pop()))
 
 			elif command.startswith('='):
 				index = command[1:]
 				if ' ' not in index: index = int(index)
 				else:
 					start, stop = index.split()
-					# print(start, stop)
+					# prin, file=outt(start, stop)
 					index = slice(int(start), int(stop))
 
-				print(index)
+				print(index, file=out)
 
-				stack.extend((stack.pop().extract(stack.pop(), index))[::-1])
+				self.stack.extend((self.stack.pop().extract(self.stack.pop(), index))[::-1])
 
 			else:
-				stack.append(Var(command))
+				self.stack.append(Var(command))
 		except Exception as e:
-			print(f'Could not execute ({e.__class__.__name__})')
-			print(e)
+			print(f'Could not execute ({e.__class__.__name__})', file=out)
+			print(e, file=out)
+			# raise e
+		
+		if not self.stack or self.stack[0] != Const(0):
+			self.stack.insert(0, Const(0))
 
-		if not stack or stack[0] != Var('0'):
-			stack.insert(0, Var('0'))
+		return out.getvalue()
+
+if __name__ == '__main__':
+	command_processor = Command_processor()
+	while 1:
+		print()
+
+		for i, exp in enumerate(command_processor.stack[1:], 1):
+			print(f'[{len(command_processor.stack) - i:3}]  ', exp)
+
+		command = ''
+		while not command:
+			command = input(': ').strip()
+
+		# raise e
+		output = command_processor.submit_command(command)
+		print(output, end='')
